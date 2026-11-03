@@ -16,8 +16,25 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "models/gemini-embedding-001")
 
+# Modelo de respaldo: se usa automáticamente si el principal está saturado (error 503/429)
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-latest").strip()
+
+# Cuánto "piensa" el modelo antes de responder (minimal, low, medium, high).
+# "low" responde mucho más rápido. Déjalo vacío ("") para usar el valor del modelo.
+GEMINI_THINKING_LEVEL = os.getenv("GEMINI_THINKING_LEVEL", "low").strip().lower() or None
+
+# Reintentos y tiempo máximo por llamada a Gemini (la librería reintenta 6 veces por defecto)
+LLM_MAX_RETRIES = 1
+LLM_TIMEOUT_SECONDS = 60
+
+# Las preguntas de seguimiento con estas palabras o menos se reformulan con el historial
+REWRITE_MAX_WORDS = 6
+
 # URL pública de la app (se usa para armar los enlaces de "compartir")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501").rstrip("/")
+
+# Modo administrador: muestra el panel técnico (estado de la API, RAG y botón Reindexar)
+ADMIN_MODE = os.getenv("ADMIN_MODE", "false").strip().lower() == "true"
 
 # Rutas de almacenamiento y documentos
 DOCS_DIR = BASE_DIR / "docs"

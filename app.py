@@ -5,10 +5,15 @@ import uuid
 import streamlit as st
 
 from src import database as db
-from src.config import APP_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL
+from src.config import ADMIN_MODE, APP_BASE_URL, GEMINI_API_KEY, GEMINI_MODEL
 from src.exporter import export_docx, export_markdown, export_pdf
 from src.metrics import log_interaction
-from src.rag_engine import build_or_load_vectorstore, get_available_pdfs, query_mentor
+from src.rag_engine import (
+    build_or_load_vectorstore,
+    get_available_pdfs,
+    prepare_mentor_messages,
+    stream_mentor_answer,
+)
 
 # ¿Se abrió un enlace compartido? (…/?share=TOKEN)
 SHARE_TOKEN = st.query_params.get("share")
@@ -188,30 +193,61 @@ defaults = {
     "session_id": str(uuid.uuid4()),
     "current_conv_id": None,        # Conversación abierta (None = nueva)
     "project_scope": db.SCOPE_ALL,  # Filtro de la barra lateral
-    "vectorstore": None,
-    "rag_status": "No inicializado",
 }
 for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 
-def init_rag_system(force_reload: bool = False):
-    """Inicializa o recarga la base de conocimiento RAG."""
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "tu_api_key_aqui":
-        st.session_state.rag_status = "⚠️ Clave de API no configurada en el archivo .env"
-        return
+api_connected = bool(GEMINI_API_KEY and GEMINI_API_KEY != "tu_api_key_aqui")
+
+
+@st.cache_resource(show_spinner="Cargando materiales del curso...")
+def load_vectorstore():
+    """
+    Carga el índice de los PDFs UNA sola vez por servidor y lo comparte entre
+    todos los usuarios (antes se cargaba de nuevo en cada pestaña/visitante).
+    """
+    return build_or_load_vectorstore(force_reload=False)
+
+
+def get_rag():
+    """Retorna (vectorstore, mensaje_de_estado) sin romper la app si algo falla."""
+    if not api_connected:
+        return None, "⚠️ Clave de API no configurada en el archivo .env"
     try:
-        with st.spinner("Procesando documentos y construyendo índice semántico..."):
-            vs, status_msg = build_or_load_vectorstore(force_reload=force_reload)
-            st.session_state.vectorstore = vs
-            st.session_state.rag_status = status_msg
-    except Exception as e:
-        st.session_state.rag_status = f"❌ Error al inicializar RAG: {e}"
+        return load_vectorstore()
+    except Exception as e:  # Los errores no se guardan en caché: se reintenta en la siguiente carga
+        return None, f"❌ Error al inicializar RAG: {e}"
 
 
-if st.session_state.vectorstore is None and GEMINI_API_KEY and GEMINI_API_KEY != "tu_api_key_aqui":
-    init_rag_system(force_reload=False)
+vectorstore, rag_status = get_rag()
+
+
+def friendly_error(e: Exception) -> str:
+    """Traduce los errores de la API a un mensaje entendible para el estudiante."""
+    text = str(e)
+    if "503" in text or "UNAVAILABLE" in text or "overloaded" in text.lower():
+        return ("⏳ Los servidores de Google están saturados en este momento. "
+                "Espera unos segundos y vuelve a enviar tu pregunta.")
+    if "429" in text or "RESOURCE_EXHAUSTED" in text:
+        return "⏳ Se alcanzó el límite de uso de la API. Espera un minuto e inténtalo de nuevo."
+    if "timeout" in text.lower() or "deadline" in text.lower():
+        return "⏳ La respuesta tardó demasiado. Intenta de nuevo con una pregunta más corta."
+    return f"❌ Ocurrió un error al procesar la respuesta: {e}"
+
+
+def typing_indicator(chunks):
+    """Muestra 'escribiendo…' hasta que llega el primer pedazo de la respuesta."""
+    hint = st.empty()
+    hint.markdown("✍️ *Mentor.ia está escribiendo…*")
+    try:
+        for chunk in chunks:
+            hint.empty()
+            yield chunk
+    finally:
+        hint.empty()
+
 
 # Si la conversación abierta fue borrada, volver a "nueva"
 current_conv = db.get_conversation(st.session_state.current_conv_id)
@@ -307,7 +343,7 @@ with st.sidebar:
 
     st.divider()
 
-    # ---------- Estado del sistema y materiales ----------
+    # ---------- Materiales del curso (visible para todos) ----------
     raw_pdf_list = get_available_pdfs()
     seen_names, pdf_list = set(), []
     for p in raw_pdf_list:
@@ -315,32 +351,38 @@ with st.sidebar:
             seen_names.add(p.name)
             pdf_list.append(p)
 
-    api_connected = bool(GEMINI_API_KEY and GEMINI_API_KEY != "tu_api_key_aqui")
-    st.markdown(
-        f"""
-        <div class="status-card">
-            <div style="font-weight: 600; font-size: 0.8rem; color: #8FAADC; margin-bottom: 6px; letter-spacing: 0.5px; text-transform: uppercase;">Estado del sistema</div>
-            <div style="font-size: 0.85rem; color: #e8ecf2; line-height: 1.7;">
-                🟢 <b>Modelo:</b> <code>{GEMINI_MODEL}</code><br>
-                📚 <b>Documentos indexados:</b> {len(pdf_list)}<br>
-                🔑 <b>API:</b> {"🟢 Conectada" if api_connected else "🔴 No configurada"}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     with st.expander("📚 Materiales del curso"):
         for p in pdf_list:
             st.markdown(f"- 📄 `{p.name}`")
         if not pdf_list:
-            st.caption("No hay documentos en docs/")
+            st.caption("Aún no hay materiales disponibles.")
 
-    if st.button("🔄 Reindexar", use_container_width=True,
-                 help="Reconstruir la base vectorial de los documentos"):
-        init_rag_system(force_reload=True)
-        st.rerun()
-    st.caption(f"**Estado del RAG:** {st.session_state.rag_status}")
+    # ---------- Panel técnico (solo si ADMIN_MODE="true" en .env) ----------
+    if ADMIN_MODE:
+        st.markdown(
+            f"""
+            <div class="status-card">
+                <div style="font-weight: 600; font-size: 0.8rem; color: #8FAADC; margin-bottom: 6px; letter-spacing: 0.5px; text-transform: uppercase;">Estado del sistema</div>
+                <div style="font-size: 0.85rem; color: #e8ecf2; line-height: 1.7;">
+                    🟢 <b>Modelo:</b> <code>{GEMINI_MODEL}</code><br>
+                    📚 <b>Documentos indexados:</b> {len(pdf_list)}<br>
+                    🔑 <b>API:</b> {"🟢 Conectada" if api_connected else "🔴 No configurada"}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("🔄 Reindexar", use_container_width=True,
+                     help="Reconstruir la base vectorial de los documentos"):
+            if api_connected:
+                with st.spinner("Reconstruyendo el índice de los PDFs..."):
+                    try:
+                        build_or_load_vectorstore(force_reload=True)
+                    except Exception as e:
+                        st.error(f"❌ No se pudo reindexar: {e}")
+                load_vectorstore.clear()  # La próxima carga lee el índice nuevo
+            st.rerun()
+        st.caption(f"**Estado del RAG:** {rag_status}")
 
     st.markdown('<div class="sidebar-footer">Equipo Mentor.ia · UAEM Tianguistenco · v2.0</div>',
                 unsafe_allow_html=True)
@@ -419,11 +461,11 @@ elif active_project:
 WELCOME_MESSAGE = """¡Hola! 👋 Soy Mentor.ia, tu copiloto para el proyecto final de la materia de Inteligencia Artificial.
 
 Puedo ayudarte con:
-📚 Entender conceptos de IA (RAG, LLMs, embeddings, agentes...)
-✏️ Redactar los apartados de tu documento académico
-🛠️ Resolver dudas técnicas de Antigravity
-💡 Elegir y delimitar el tema de tu proyecto
-🎯 Organizar el trabajo en equipo
+- 📚 Entender conceptos de IA (RAG, LLMs, embeddings, agentes...)
+- ✏️ Redactar los apartados de tu documento académico
+- 🛠️ Resolver dudas técnicas de Antigravity
+- 💡 Elegir y delimitar el tema de tu proyecto
+- 🎯 Organizar el trabajo en equipo
 
 Cuéntame, ¿en qué estás trabajando ahora mismo?"""
 
@@ -491,33 +533,36 @@ if prompt_to_process:
             st.error(error_msg)
             db.add_message(conv_id, "assistant", error_msg)
         else:
-            with st.spinner("Mentor.ia está analizando tu consulta..."):
-                start_time = time.perf_counter()
-                try:
-                    result = query_mentor(
+            start_time = time.perf_counter()
+            try:
+                # Paso 1: buscar en los PDFs (rápido)
+                with st.spinner("Buscando en tus materiales..."):
+                    llm_messages, sources, search_query = prepare_mentor_messages(
                         query=prompt_to_process,
                         chat_history=messages,  # Historial previo (sin la pregunta actual)
-                        vectorstore=st.session_state.vectorstore,
+                        vectorstore=vectorstore,
                         project_instructions=active_project["instructions"] if active_project else None,
                     )
-                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-                    answer = result["answer"]
-                    sources = result["sources"]
-                    search_query = result.get("search_query", prompt_to_process)
 
-                    st.markdown(answer)
-                    if sources:
-                        render_sources(sources, search_query, prompt_to_process)
+                # Paso 2: mostrar la respuesta mientras Gemini la escribe
+                answer = st.write_stream(typing_indicator(stream_mentor_answer(llm_messages)))
+                if not isinstance(answer, str):
+                    answer = "".join(str(part) for part in answer)
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-                    db.add_message(conv_id, "assistant", answer, sources=sources,
-                                   search_query=search_query, original_query=prompt_to_process)
-                    log_interaction(st.session_state.session_id, prompt_to_process, answer,
-                                    sources, elapsed_ms)
-                except Exception as e:
-                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-                    err = f"❌ Ocurrió un error al procesar la respuesta: {e}"
-                    st.error(err)
-                    db.add_message(conv_id, "assistant", err)
-                    log_interaction(st.session_state.session_id, prompt_to_process, err,
-                                    None, elapsed_ms)
+                if sources:
+                    render_sources(sources, search_query, prompt_to_process)
+
+                db.add_message(conv_id, "assistant", answer, sources=sources,
+                               search_query=search_query, original_query=prompt_to_process)
+                log_interaction(st.session_state.session_id, prompt_to_process, answer,
+                                sources, elapsed_ms)
+            except Exception as e:
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                print(f"Error al generar respuesta: {e}")  # El detalle técnico queda en la terminal
+                err = friendly_error(e)
+                st.error(err)
+                db.add_message(conv_id, "assistant", err)
+                log_interaction(st.session_state.session_id, prompt_to_process, err,
+                                None, elapsed_ms)
     st.rerun()
