@@ -233,6 +233,7 @@ def query_mentor(
     query: str,
     chat_history: Optional[List[Dict[str, str]]] = None,
     vectorstore: Optional[FAISS] = None,
+    project_instructions: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Genera una respuesta educativa usando RAG (si el vectorstore está activo)
@@ -272,7 +273,10 @@ def query_mentor(
             print(f"Error al recuperar contexto: {e}")
 
     # Formulación del prompt conversacional
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    system_prompt = SYSTEM_PROMPT
+    if project_instructions:
+        system_prompt += f"\n\nINSTRUCCIONES DEL PROYECTO ACTUAL:\n{project_instructions}"
+    messages = [SystemMessage(content=system_prompt)]
 
     # Incluir historial previo si está disponible
     if chat_history:

@@ -16,6 +16,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 EMBEDDINGS_MODEL = os.getenv("EMBEDDINGS_MODEL", "models/gemini-embedding-001")
 
+# URL pública de la app (se usa para armar los enlaces de "compartir")
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501").rstrip("/")
+
 # Rutas de almacenamiento y documentos
 DOCS_DIR = BASE_DIR / "docs"
 STORAGE_DIR = BASE_DIR / "storage"
