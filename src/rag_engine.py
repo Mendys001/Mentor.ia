@@ -21,6 +21,7 @@ from src.config import (
     CHUNK_OVERLAP,
     LLM_MAX_RETRIES,
     LLM_TIMEOUT_SECONDS,
+    LLM_FALLBACK_TIMEOUT_SECONDS,
     REWRITE_MAX_WORDS,
 )
 
@@ -93,7 +94,7 @@ def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
 
 
 @lru_cache(maxsize=4)
-def _build_chat_model(model: str, thinking_level: Optional[str]) -> ChatGoogleGenerativeAI:
+def _build_chat_model(model: str, thinking_level: Optional[str], timeout: float) -> ChatGoogleGenerativeAI:
     """Crea (una sola vez por combinación) un cliente de chat de Gemini."""
     if not GEMINI_API_KEY:
         raise ValueError("No se ha configurado GEMINI_API_KEY en el archivo .env")
@@ -102,23 +103,29 @@ def _build_chat_model(model: str, thinking_level: Optional[str]) -> ChatGoogleGe
         google_api_key=GEMINI_API_KEY,
         temperature=0.3,
         max_retries=LLM_MAX_RETRIES,   # Falla rápido y pasa al modelo de respaldo
-        timeout=LLM_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     if thinking_level:
         kwargs["thinking_level"] = thinking_level  # Menos "pensamiento" = respuesta más rápida
     return ChatGoogleGenerativeAI(**kwargs)
 
 
-def get_llm_model():
-    """
-    Modelo conversacional principal. Si Google responde con error (p. ej. 503 por
-    saturación), LangChain reintenta automáticamente con el modelo de respaldo.
-    """
-    primary = _build_chat_model(GEMINI_MODEL, GEMINI_THINKING_LEVEL)
+def get_chat_models() -> List[ChatGoogleGenerativeAI]:
+    """Lista de modelos en orden de preferencia: [principal, respaldo]."""
+    models = [_build_chat_model(GEMINI_MODEL, GEMINI_THINKING_LEVEL, LLM_TIMEOUT_SECONDS)]
     if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
         # El respaldo usa la configuración por defecto para ser compatible con cualquier versión
-        return primary.with_fallbacks([_build_chat_model(GEMINI_FALLBACK_MODEL, None)])
-    return primary
+        models.append(_build_chat_model(GEMINI_FALLBACK_MODEL, None, LLM_FALLBACK_TIMEOUT_SECONDS))
+    return models
+
+
+def get_llm_model():
+    """
+    Modelo para respuestas completas (sin streaming). Si el principal falla
+    (503, límite de uso, tiempo agotado), LangChain usa el de respaldo.
+    """
+    primary, *fallbacks = get_chat_models()
+    return primary.with_fallbacks(fallbacks) if fallbacks else primary
 
 
 def build_or_load_vectorstore(force_reload: bool = False) -> Tuple[Optional[FAISS], str]:
@@ -343,11 +350,30 @@ def prepare_mentor_messages(
 
 
 def stream_mentor_answer(messages: List[Any]) -> Iterator[str]:
-    """Paso 2: genera la respuesta en pedazos para mostrarla mientras se escribe."""
-    for chunk in get_llm_model().stream(messages):
-        text = extract_text_content(chunk.content)
-        if text:
-            yield text
+    """
+    Paso 2: genera la respuesta en pedazos para mostrarla mientras se escribe.
+
+    Si un modelo falla ANTES de escribir texto, se prueba el siguiente (respaldo).
+    Se hace a mano porque Gemini envía primero pedazos vacíos (su "pensamiento")
+    y el respaldo automático de LangChain ya no se activaría después de ellos.
+    """
+    last_error: Optional[Exception] = None
+    for model in get_chat_models():
+        wrote_text = False
+        try:
+            for chunk in model.stream(messages):
+                text = extract_text_content(chunk.content)
+                if text:
+                    wrote_text = True
+                    yield text
+            return  # Respuesta completa
+        except Exception as e:
+            if wrote_text:
+                raise  # Ya se mostró parte de la respuesta: no mezclar dos modelos
+            print(f"El modelo {getattr(model, 'model', '?')} falló ({e}). Probando con el de respaldo...")
+            last_error = e
+    if last_error:
+        raise last_error
 
 
 def query_mentor(

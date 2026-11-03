@@ -232,8 +232,9 @@ def friendly_error(e: Exception) -> str:
                 "Espera unos segundos y vuelve a enviar tu pregunta.")
     if "429" in text or "RESOURCE_EXHAUSTED" in text:
         return "⏳ Se alcanzó el límite de uso de la API. Espera un minuto e inténtalo de nuevo."
-    if "timeout" in text.lower() or "deadline" in text.lower():
-        return "⏳ La respuesta tardó demasiado. Intenta de nuevo con una pregunta más corta."
+    if any(word in text.lower() for word in ("timeout", "timed out", "deadline")):
+        return ("⏳ Google tardó demasiado en responder (servidores saturados). "
+                "Espera unos segundos y vuelve a enviar tu pregunta.")
     return f"❌ Ocurrió un error al procesar la respuesta: {e}"
 
 

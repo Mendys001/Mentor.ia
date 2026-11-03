@@ -23,9 +23,10 @@ GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-latest"
 # "low" responde mucho más rápido. Déjalo vacío ("") para usar el valor del modelo.
 GEMINI_THINKING_LEVEL = os.getenv("GEMINI_THINKING_LEVEL", "low").strip().lower() or None
 
-# Reintentos y tiempo máximo por llamada a Gemini (la librería reintenta 6 veces por defecto)
+# Reintentos y tiempo máximo sin recibir respuesta de Gemini (la librería reintenta 6 veces por defecto)
 LLM_MAX_RETRIES = 1
-LLM_TIMEOUT_SECONDS = 60
+LLM_TIMEOUT_SECONDS = 25            # Modelo principal: si no responde en 25 s, pasa al respaldo
+LLM_FALLBACK_TIMEOUT_SECONDS = 60   # Modelo de respaldo: se le da más margen
 
 # Las preguntas de seguimiento con estas palabras o menos se reformulan con el historial
 REWRITE_MAX_WORDS = 6
