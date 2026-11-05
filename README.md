@@ -14,7 +14,7 @@ Mentor.ia es un tutor para la materia de **Inteligencia Artificial** de la Lic. 
 | 🔗 **Compartir (solo lectura)** | Genera un enlace para que otros vean una conversación sin poder escribir en ella. El enlace se puede desactivar en cualquier momento. |
 | 📄 **Documentos a pedido** | Pide *"hazme una guía de la unidad 1 en PDF"* o *"dámelo en Word"* y la respuesta trae su botón de descarga (PDF, Word o Markdown). |
 | 📥 **Exportar** | Descarga cualquier conversación en **Word (.docx)**, **PDF** (con acentos y emojis) o **Markdown (.md)**, con o sin fuentes. |
-| 📖 **Citas de los materiales** | Cada respuesta muestra el documento y la página de donde salió la información. |
+| 📖 **Citas de los materiales** | Cada respuesta muestra el documento y la página de donde salió la información, como etiquetas que se abren para ver el fragmento. |
 | ⚡ **Respuestas en tiempo real** | El texto aparece mientras se escribe y la vista baja sola para seguirlo. Si el modelo principal está saturado, se prueban modelos de respaldo automáticamente. |
 | 🛠️ **Modo administrador** | Panel técnico (estado de la API, *Reindexar*, *Probar modelos* y último error) visible solo para el equipo de desarrollo. |
 
@@ -110,9 +110,10 @@ Van en el archivo `.env` (local) o en **Secrets** (Streamlit Cloud).
 
 ## 🧭 Cómo se usa
 
-- **Nueva conversación:** botón *✏️ Nueva conversación*. El título se toma de tu primera pregunta.
-- **Proyectos:** en *➕ Nuevo proyecto* escribe un nombre y, si quieres, instrucciones. Al seleccionar un proyecto, las conversaciones nuevas se crean dentro de él. En *⚙️ Configurar proyecto* puedes editarlo o eliminarlo (sus conversaciones no se borran, pasan a *Sin proyecto*).
-- **Opciones de una conversación** (*⚙️ Opciones*): renombrar, mover a otro proyecto o eliminar.
+- **Nueva conversación:** botón *✏️ Nueva conversación*. Aparece la pantalla de inicio con cuatro sugerencias (da clic en cualquier tarjeta para preguntarla). El título se toma de tu primera pregunta.
+- **Proyectos:** junto a la etiqueta *📁 PROYECTOS*, el botón **➕** crea uno (nombre e instrucciones opcionales). Al elegir un proyecto en la lista, las conversaciones nuevas se crean dentro de él y aparece **⚙️** para editarlo o eliminarlo (sus conversaciones no se borran, pasan a *Sin proyecto*).
+- **Encabezado de la conversación:** muestra el título y su proyecto, con los botones **🔗 Compartir**, **📥 Exportar** y **⚙️** (renombrar, mover a otro proyecto o eliminar).
+- **Fuentes:** debajo de cada respuesta aparecen como etiquetas (*📄 archivo.pdf · pág. 1*); da clic en una para ver el fragmento citado.
 - **🔄 Reintentar:** aparece debajo de la última respuesta. Genera una respuesta nueva para tu última pregunta (útil si salió un error o no te gustó la respuesta).
 - **✏️ Editar:** aparece debajo de cada pregunta tuya. Corrige el texto y da *Enviar*: la pregunta se responde de nuevo y **se borra lo que venía después** de ella.
 - Las respuestas de error (⏳ ❌) no se incluyen al exportar ni en los enlaces compartidos.

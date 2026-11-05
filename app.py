@@ -1,3 +1,4 @@
+import html
 import re
 import time
 import unicodedata
@@ -33,77 +34,178 @@ st.set_page_config(
     page_title="Mentor.ia · UAEM Tianguistenco",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="collapsed" if SHARE_TOKEN else "expanded",
+    # "auto": abierta en computadora y cerrada en teléfono (para no tapar el chat)
+    initial_sidebar_state="collapsed" if SHARE_TOKEN else "auto",
 )
 
 db.init_db()
 
 # ==============================================================================
-# ESTILOS CSS GLOBALES (DARK MODE MODERNO)
+# ESTILOS (los colores base viven en .streamlit/config.toml)
 # ==============================================================================
+# Paleta: fondo #0e1117 · superficie #15192a · tarjeta #131826 · borde #1f2937
+#         azul #4472C4 · acento #8FAADC · texto #e8ecf2 · texto secundario #8b97ad
 st.markdown(
     """
     <style>
-    .main .block-container { padding-top: 2rem; max-width: 1000px; }
-    [data-testid="stSidebar"] { background: #15192a; border-right: 1px solid #1f2937; }
+    :root {
+        --mi-bg: #0e1117; --mi-surface: #15192a; --mi-card: #131826; --mi-border: #1f2937;
+        --mi-primary: #4472C4; --mi-primary-soft: rgba(68, 114, 196, 0.18);
+        --mi-accent: #8FAADC; --mi-text: #e8ecf2; --mi-muted: #8b97ad;
+    }
+
+    /* ---------- Estructura ---------- */
+    .block-container { max-width: 860px; padding-top: 3.25rem; padding-bottom: 1rem; }
+    [data-testid="stHeader"] { background: transparent; }
+    [data-testid="stSidebar"] { border-right: 1px solid var(--mi-border); }
+    [data-testid="stSidebarContent"] [data-testid="stVerticalBlock"] { gap: 0.6rem; }
     h1, h2, h3 { color: #ffffff; }
-    .gradient-text {
-        background: linear-gradient(90deg, #ffffff, #8FAADC);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 700;
-        font-size: 2.4rem;
-        display: inline-block;
+
+    /* ---------- Barra lateral ---------- */
+    .mi-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    .mi-tile {
+        display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+        width: 38px; height: 38px; border-radius: 10px; background: var(--mi-primary-soft);
+        font-size: 1.25rem;
     }
-    .subtitle-mentoria {
-        color: #6b7a92;
-        font-size: 0.85rem;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-        margin-top: -8px;
-        margin-bottom: 1.5rem;
-        font-weight: 600;
+    .mi-brand-name { font-size: 1.05rem; font-weight: 700; color: #ffffff; line-height: 1.2; }
+    .mi-brand-sub { font-size: 0.75rem; color: var(--mi-muted); }
+    .stMarkdown p.mi-label {
+        font-size: 0.7rem !important; line-height: 28px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--mi-muted); margin: 0 !important;
     }
+    .stMarkdown p.mi-footer { font-size: 0.75rem; color: var(--mi-muted); padding: 0.25rem 0.6rem 0; }
+
+    /* Lista de conversaciones: renglones alineados a la izquierda, en una sola línea */
+    [data-testid="stSidebarContent"] .st-key-conv_list { gap: 2px; }
+    .st-key-conv_list button {
+        justify-content: flex-start; min-height: 36px; padding: 0 10px; border: 0;
+        background: transparent; color: #c9d1de; font-weight: 400;
+    }
+    .st-key-conv_list button > div, .st-key-conv_list button span {
+        justify-content: flex-start; width: 100%; min-width: 0; overflow: hidden;
+    }
+    .st-key-conv_list button p {
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left;
+        font-size: 0.9rem; margin: 0;
+    }
+    .st-key-conv_list button:hover { background: rgba(255, 255, 255, 0.04); color: #ffffff; }
+    .st-key-conv_list [data-testid="stBaseButton-primary"] {
+        background: var(--mi-primary-soft); color: #ffffff; font-weight: 500;
+    }
+    .st-key-conv_list [data-testid="stBaseButton-primary"]:hover { background: var(--mi-primary-soft); }
+
+    /* Streamlit pone margen negativo bajo cada texto; en filas (etiqueta + botones) lo descentra */
+    [data-testid="stMarkdownContainer"]:has(.mi-label, .mi-src-label, .mi-title, .mi-doc) {
+        margin-bottom: 0 !important;
+    }
+
+    /* Botones pequeños de íconos (➕ ⚙️) junto a las etiquetas */
+    [class*="st-key-iconbtn_"] button { min-height: 28px; padding: 0 8px; }
+    [class*="st-key-iconbtn_"] [data-testid="stPopoverButton"] > div > div:nth-child(2) { display: none; }
+
+    /* ---------- Encabezado de la conversación ---------- */
+    .st-key-topbar {
+        border-bottom: 1px solid var(--mi-border); padding-bottom: 0.75rem; margin-bottom: 0.5rem;
+    }
+    .stMarkdown p.mi-title { font-size: 1.05rem; font-weight: 600; color: #ffffff; margin: 0;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mi-chip {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem;
+        color: var(--mi-muted); border: 1px solid var(--mi-border); border-radius: 999px;
+        padding: 1px 10px; white-space: nowrap;
+    }
+    .st-key-topbar_actions button { min-height: 34px; font-size: 0.85rem; }
+
+    /* ---------- Mensajes ---------- */
+    [data-testid="stChatMessage"] { background: transparent; padding: 0.25rem 0; gap: 14px; }
+    [data-testid="stChatMessage"] h1 { font-size: 1.3rem; }
+    [data-testid="stChatMessage"] h2 { font-size: 1.15rem; }
+    [data-testid="stChatMessage"] h3, [data-testid="stChatMessage"] h4 { font-size: 1rem; }
+    [data-testid="stChatMessage"] h1, [data-testid="stChatMessage"] h2,
+    [data-testid="stChatMessage"] h3 { padding: 0.6rem 0 0.2rem; }
+
+    /* Avatar de Mentor.ia: círculo azul tenue (el avatar es el primer hijo del mensaje) */
+    [data-testid="stChatMessage"] > div:first-child {
+        background: var(--mi-primary-soft); border-radius: 50%;
+    }
+
+    /* Preguntas del estudiante: a la derecha, en burbuja y sin avatar */
+    [data-testid="stChatMessage"]:has([class*="st-key-ubub_"]) > div:first-child { display: none; }
+    [data-testid="stChatMessage"]:has([class*="st-key-ubub_"]) [data-testid="stChatMessageContent"] {
+        display: flex; flex-direction: column; align-items: flex-end;
+    }
+    [data-testid="stChatMessage"]:has([class*="st-key-ubub_"]) [data-testid="stChatMessageContent"] > [data-testid="stVerticalBlock"] {
+        gap: 2px; align-items: flex-end;
+    }
+    [class*="st-key-ubub_"] {
+        width: fit-content !important; max-width: 80%; margin-left: auto;
+        background: var(--mi-surface); border: 1px solid var(--mi-border);
+        border-radius: 16px 16px 4px 16px; padding: 10px 16px;
+    }
+    [class*="st-key-ubub_"] .stMarkdown p { margin: 0 !important; }
+    [class*="st-key-ubub_"] [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
+    [class*="st-key-ubub_"] [data-testid="stMarkdownContainer"] > :last-child { margin-bottom: 0 !important; }
+    [class*="st-key-uact_"] { justify-content: flex-end; }
+
+    /* Botones discretos bajo los mensajes (Editar, Reintentar) */
+    [class*="st-key-uact_"] button, [class*="st-key-aact_"] button {
+        min-height: 28px; font-size: 0.8rem; color: var(--mi-muted); padding: 0 6px;
+    }
+    [class*="st-key-uact_"] button:hover, [class*="st-key-aact_"] button:hover { color: var(--mi-text); }
+
+    /* Fuentes: etiquetas pequeñas */
+    [class*="st-key-src_"] { align-items: center; gap: 6px; }
+    .stMarkdown p.mi-src-label { font-size: 0.75rem; color: var(--mi-muted); margin: 0; }
+    [class*="st-key-src_"] button {
+        min-height: 26px; padding: 0 8px; border: 1px solid var(--mi-border);
+        background: var(--mi-card); color: var(--mi-accent); border-radius: 6px;
+    }
+    [class*="st-key-src_"] button p { font-size: 0.75rem; }
+    .mi-snippet { font-size: 0.85rem; color: var(--mi-text); font-style: italic; }
+
+    /* Tarjeta de documento descargable */
+    [class*="st-key-doccard_"] {
+        background: var(--mi-card); border-radius: 12px; padding: 14px 16px;
+    }
+    .mi-doc { display: flex; align-items: center; gap: 14px; }
+    .mi-doc .mi-tile { width: 42px; height: 42px; }
+    .mi-doc-title { font-size: 0.95rem; font-weight: 600; color: #ffffff; line-height: 1.3; }
+    .mi-doc-sub { font-size: 0.75rem; color: var(--mi-muted); }
+    [class*="st-key-doccard_"] button { min-height: 36px; font-size: 0.85rem; }
+
+    /* ---------- Pantalla de inicio ---------- */
+    .mi-hero { display: flex; flex-direction: column; align-items: center; text-align: center;
+               gap: 10px; padding: 3.5rem 0 1.5rem; }
+    .mi-hero .mi-tile { width: 56px; height: 56px; border-radius: 16px; font-size: 1.8rem; }
+    .mi-hero h1 { font-size: 2rem; font-weight: 700; margin: 0.4rem 0 0; padding: 0; line-height: 1.2; }
+    .mi-hero p { color: var(--mi-muted); font-size: 1rem; max-width: 560px; margin: 0; }
+
+    /* Tarjetas de sugerencias: toda la tarjeta es el botón */
+    [class*="st-key-sug_"] {
+        position: relative; background: var(--mi-card); border-radius: 12px;
+        padding: 14px 16px; min-height: 76px; transition: border-color 0.15s;
+    }
+    [class*="st-key-sug_"]:hover { border-color: var(--mi-primary) !important; }
+    .mi-sug-title { font-size: 0.9rem; font-weight: 600; color: #ffffff; }
+    .mi-sug-desc { font-size: 0.8rem; color: var(--mi-muted); }
+    [class*="st-key-sug_"] [data-testid="stElementContainer"]:has([data-testid="stButton"]) {
+        position: absolute; inset: 0; width: auto !important; margin: 0; z-index: 1;
+    }
+    [class*="st-key-sug_"] [data-testid="stButton"],
+    [class*="st-key-sug_"] [data-testid="stButton"] > div { width: 100%; height: 100%; }
+    [class*="st-key-sug_"] [data-testid="stButton"] button {
+        width: 100%; height: 100%; opacity: 0; cursor: pointer;
+    }
+
+    /* ---------- Caja para escribir ---------- */
+    [data-testid="stChatInput"] { border-radius: 14px; }
+    .stMarkdown p.mi-composer-note { text-align: center; color: var(--mi-muted); font-size: 0.75rem; margin: 0.25rem 0 0; }
+
+    /* ---------- Panel de administrador ---------- */
     .status-card {
-        background: #0e1117;
-        border: 1px solid #1f2937;
-        border-radius: 10px;
-        padding: 12px;
-        margin-bottom: 1rem;
-    }
-    .source-box {
-        background-color: #131826;
-        border-left: 4px solid #4472C4;
-        padding: 0.8rem;
-        border-radius: 4px;
-        margin-top: 0.5rem;
-        font-size: 0.9rem;
-        color: #e8ecf2;
-    }
-    .source-title { font-weight: 600; color: #8FAADC; }
-    .readonly-banner {
-        background: #131826;
-        border: 1px solid #4472C4;
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin-bottom: 1rem;
-        color: #8FAADC;
-        font-size: 0.9rem;
-    }
-    .composer-footer {
-        text-align: center;
-        color: #6b7a92;
-        font-size: 0.78rem;
-        margin-top: 6px;
-        margin-bottom: 14px;
-    }
-    .sidebar-footer {
-        color: #6b7a92;
-        font-size: 0.78rem;
-        text-align: center;
-        margin-top: 2rem;
-        padding-top: 1rem;
-        border-top: 1px solid #1f2937;
+        background: var(--mi-bg); border: 1px solid var(--mi-border); border-radius: 10px;
+        padding: 12px; margin-bottom: 0.5rem;
     }
     </style>
     """,
@@ -114,32 +216,39 @@ st.markdown(
 # ==============================================================================
 # FUNCIONES DE APOYO
 # ==============================================================================
-def render_header(subtitle: str = "UAEM TIANGUISTENCO · COPILOTO ACADÉMICO DE IA") -> None:
+def esc(text) -> str:
+    """Escapa texto que va dentro de HTML propio (títulos, nombres de proyecto...)."""
+    return html.escape(str(text))
+
+
+def render_brand() -> None:
+    """Logo y nombre de la app (barra lateral y vista compartida)."""
     st.markdown(
-        f"""
-        <div>
-            <span class="gradient-text">🎓 Mentor.ia</span>
-            <div class="subtitle-mentoria">{subtitle}</div>
+        """
+        <div class="mi-brand">
+            <span class="mi-tile">🎓</span>
+            <div>
+                <div class="mi-brand-name">Mentor.ia</div>
+                <div class="mi-brand-sub">UAEM Tianguistenco</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_sources(sources, search_query=None, original_query=None) -> None:
-    with st.expander("📖 Fuentes consultadas de tus documentos"):
-        if search_query and search_query != original_query:
-            st.caption(f"🔍 **Búsqueda contextualizada:** *\"{search_query}\"*")
-        for src in sources:
-            st.markdown(
-                f"""
-                <div class="source-box">
-                    <span class="source-title">📄 {src['file_name']} (Página {src['page']})</span><br>
-                    <em>"...{src['snippet']}..."</em>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+def render_sources(sources, key: str, search_query=None, original_query=None) -> None:
+    """Fuentes como etiquetas pequeñas; al dar clic se ve el fragmento citado."""
+    with st.container(horizontal=True, gap="small", vertical_alignment="center", key=f"src_{key}"):
+        st.markdown('<p class="mi-src-label">Fuentes</p>', unsafe_allow_html=True)
+        for i, src in enumerate(sources):
+            with st.popover(f"📄 {src['file_name']} · pág. {src['page']}", type="tertiary",
+                            key=f"srcpop_{key}_{i}"):
+                st.markdown(f"**{src['file_name']}** · página {src['page']}")
+                st.markdown(f'<div class="mi-snippet">"…{esc(src["snippet"])}…"</div>',
+                            unsafe_allow_html=True)
+                if ADMIN_MODE and search_query and search_query != original_query:
+                    st.caption(f"🔍 Búsqueda usada: *{search_query}*")
 
 
 def _request_resend(message_id: int, text: str) -> None:
@@ -155,26 +264,51 @@ def _request_edit(message_id: int) -> None:
 
 
 def render_document_downloads(msg, conv) -> None:
-    """Botones para descargar como archivo una respuesta que se pidió como documento."""
+    """Tarjeta de archivo para una respuesta que se pidió como documento (PDF, Word, Markdown)."""
     project = db.get_project(conv.get("project_id")) if conv else None
     project_name = project["name"] if project else None
     default_title = conv["title"] if conv else "Documento"
     title, _ = split_document_title(msg["content"], default_title)
     requested = msg["attachment"]
     order = [requested] + [f for f in DOCUMENT_FORMATS if f != requested]  # El pedido va primero
-    with st.container(horizontal=True, gap="small"):
-        for fmt in order:
-            label, ext, mime = DOCUMENT_FORMATS[fmt]
-            st.download_button(
-                f"{label}" if fmt != requested else f"⬇️ Descargar {label}",
-                # Se genera al dar clic (los valores se fijan con argumentos por defecto)
-                lambda c=msg["content"], f=fmt, t=default_title, s=msg.get("sources"):
-                    export_document(c, f, t, s, project_name),
-                file_name=f"{safe_filename(title)}.{ext}",
-                mime=mime,
-                type="primary" if fmt == requested else "tertiary",
-                key=f"doc_{msg.get('id', id(msg))}_{fmt}",
-            )
+    req_label = DOCUMENT_FORMATS[requested][0]
+    msg_key = msg.get("id", "live")
+
+    with st.container(border=True, horizontal=True, vertical_alignment="center",
+                      gap="medium", key=f"doccard_{msg_key}"):
+        st.markdown(
+            f"""
+            <div class="mi-doc">
+                <span class="mi-tile">{req_label.split()[0]}</span>
+                <div>
+                    <div class="mi-doc-title">{esc(title)}</div>
+                    <div class="mi-doc-sub">Documento listo · incluye fuentes</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+            width="stretch",
+        )
+        with st.container(horizontal=True, gap="small", width="content"):
+            for fmt in order:
+                label, ext, mime = DOCUMENT_FORMATS[fmt]
+                name = label.split(" ", 1)[1]  # "📕 PDF" -> "PDF"
+                st.download_button(
+                    f"⬇️ Descargar {name}" if fmt == requested else name,
+                    # Se genera al dar clic (los valores se fijan con argumentos por defecto)
+                    lambda c=msg["content"], f=fmt, t=default_title, s=msg.get("sources"):
+                        export_document(c, f, t, s, project_name),
+                    file_name=f"{safe_filename(title)}.{ext}",
+                    mime=mime,
+                    type="primary" if fmt == requested else "secondary",
+                    key=f"doc_{msg_key}_{fmt}",
+                )
+
+
+def render_user_message(text: str, key) -> None:
+    """Pregunta del estudiante: burbuja a la derecha (los estilos usan la clave ubub_)."""
+    with st.container(key=f"ubub_{key}"):
+        st.markdown(text)
 
 
 def render_messages(messages, editable: bool = False, conv=None) -> None:
@@ -187,17 +321,22 @@ def render_messages(messages, editable: bool = False, conv=None) -> None:
     last_index = len(messages) - 1
     for i, msg in enumerate(messages):
         role = msg["role"]
+        msg_key = msg.get("id", f"{i}")
         with st.chat_message(role, avatar="🎓" if role == "assistant" else "👤"):
-            st.markdown(msg["content"])
-            if msg.get("sources"):
-                render_sources(msg["sources"], msg.get("search_query"), msg.get("original_query"))
+            if role == "user":
+                render_user_message(msg["content"], msg_key)
+            else:
+                st.markdown(msg["content"])
             if role == "assistant" and msg.get("attachment") in DOCUMENT_FORMATS:
                 render_document_downloads(msg, conv)
+            if msg.get("sources"):
+                render_sources(msg["sources"], msg_key, msg.get("search_query"),
+                               msg.get("original_query"))
             if not editable or "id" not in msg:
                 continue
 
             if role == "user":
-                with st.container(horizontal=True, gap="small"):
+                with st.container(horizontal=True, gap="small", key=f"uact_{msg_key}"):
                     with st.popover("✏️ Editar", type="tertiary", key=f"edit_pop_{msg['id']}"):
                         st.text_area("Edita tu pregunta", value=msg["content"],
                                      key=f"edit_text_{msg['id']}")
@@ -212,9 +351,11 @@ def render_messages(messages, editable: bool = False, conv=None) -> None:
             elif i == last_index:
                 question = next((m for m in reversed(messages[:i]) if m["role"] == "user"), None)
                 if question:
-                    st.button("🔄 Reintentar", type="tertiary", key=f"retry_{msg['id']}",
-                              help="Genera otra respuesta para tu última pregunta",
-                              on_click=_request_resend, args=(question["id"], question["content"]))
+                    with st.container(horizontal=True, key=f"aact_{msg_key}"):
+                        st.button("🔄 Reintentar", type="tertiary", key=f"retry_{msg['id']}",
+                                  help="Genera otra respuesta para tu última pregunta",
+                                  on_click=_request_resend,
+                                  args=(question["id"], question["content"]))
 
 
 def safe_filename(title: str) -> str:
@@ -252,7 +393,7 @@ def render_export_buttons(conv, messages, key_prefix: str) -> None:
 # VISTA COMPARTIDA (SOLO LECTURA)
 # ==============================================================================
 if SHARE_TOKEN:
-    render_header("CONVERSACIÓN COMPARTIDA · SOLO LECTURA")
+    render_brand()
     shared = db.get_conversation_by_token(SHARE_TOKEN)
 
     if not shared:
@@ -260,13 +401,16 @@ if SHARE_TOKEN:
         st.stop()
 
     shared_messages = db.get_messages(shared["id"])
-    st.markdown(
-        f'<div class="readonly-banner">👁️ Estás viendo <b>{shared["title"]}</b> en modo '
-        f"solo lectura. Puedes descargarla para trabajar con ella.</div>",
-        unsafe_allow_html=True,
-    )
-    with st.popover("📥 Descargar"):
-        render_export_buttons(shared, shared_messages, key_prefix="shared")
+    with st.container(horizontal=True, vertical_alignment="center", key="topbar"):
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:12px;min-width:0">'
+            f'<p class="mi-title">{esc(shared["title"])}</p>'
+            f'<span class="mi-chip">👁️ Solo lectura</span></div>',
+            unsafe_allow_html=True,
+            width="stretch",
+        )
+        with st.popover("📥 Descargar"):
+            render_export_buttons(shared, shared_messages, key_prefix="shared")
 
     render_messages(clean_history(shared_messages), conv=shared)  # Sin editar ni errores
     st.stop()  # No se dibuja nada más: sin barra lateral ni caja de chat
@@ -390,61 +534,11 @@ project_names = {p["id"]: p["name"] for p in projects}
 # ==============================================================================
 # BARRA LATERAL: PROYECTOS Y CONVERSACIONES
 # ==============================================================================
-with st.sidebar:
-    st.markdown(
-        """
-        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-            <span style="font-size: 1.8rem;">🎓</span>
-            <span style="font-weight: 700; font-size: 1.3rem; color: #ffffff;">Mentor.ia</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.caption("Lic. en Ingeniería en Software · **UAEM Tianguistenco**")
-
-    if st.button("✏️ Nueva conversación", use_container_width=True, type="primary"):
-        st.session_state.current_conv_id = None
-        st.rerun()
-
-    # ---------- Proyectos ----------
-    st.subheader("📁 Proyectos")
-    scope_options = [db.SCOPE_ALL, db.SCOPE_NONE] + [p["id"] for p in projects]
-    scope_labels = {db.SCOPE_ALL: "Todas las conversaciones", db.SCOPE_NONE: "Sin proyecto",
-                    **project_names}
-    # Cambios de proyecto pedidos por botones se aplican ANTES de dibujar el selector
-    if "_next_scope" in st.session_state:
-        st.session_state.project_scope = st.session_state.pop("_next_scope")
-    if st.session_state.project_scope not in scope_options:
-        st.session_state.project_scope = db.SCOPE_ALL
-
-    st.selectbox(
-        "Proyecto",
-        scope_options,
-        format_func=lambda x: scope_labels[x],
-        key="project_scope",
-        label_visibility="collapsed",
-    )
-    scope = st.session_state.project_scope
-
-    with st.expander("➕ Nuevo proyecto"):
-        with st.form("new_project", clear_on_submit=True):
-            new_name = st.text_input("Nombre")
-            new_instr = st.text_area(
-                "Instrucciones (opcional)",
-                placeholder="Ej.: Responde con ejemplos en Python y enfócate en árboles de decisión.",
-            )
-            if st.form_submit_button("Crear proyecto", use_container_width=True):
-                if new_name.strip():
-                    st.session_state._next_scope = db.create_project(new_name, new_instr)
-                    st.session_state.current_conv_id = None
-                    st.rerun()
-                else:
-                    st.warning("Escribe un nombre para el proyecto.")
-
-    # Configuración del proyecto seleccionado
+def render_project_forms(scope) -> None:
+    """Botones ⚙️ (configurar el proyecto elegido) y ➕ (nuevo proyecto) junto a la etiqueta."""
     if scope not in (db.SCOPE_ALL, db.SCOPE_NONE):
         project = db.get_project(scope)
-        with st.expander("⚙️ Configurar proyecto"):
+        with st.popover("⚙️", type="tertiary", help="Configurar proyecto", key="iconbtn_cfg"):
             with st.form(f"edit_project_{scope}"):
                 edit_name = st.text_input("Nombre", value=project["name"])
                 edit_instr = st.text_area("Instrucciones", value=project["instructions"] or "")
@@ -457,18 +551,68 @@ with st.sidebar:
                 st.session_state._next_scope = db.SCOPE_ALL
                 st.rerun()
 
+    with st.popover("➕", type="tertiary", help="Nuevo proyecto", key="iconbtn_new"):
+        with st.form("new_project", clear_on_submit=True):
+            st.markdown("**Nuevo proyecto**")
+            new_name = st.text_input("Nombre")
+            new_instr = st.text_area(
+                "Instrucciones (opcional)",
+                placeholder="Ej.: Responde con ejemplos en Python y enfócate en árboles de decisión.",
+            )
+            if st.form_submit_button("Crear proyecto", type="primary", use_container_width=True):
+                if new_name.strip():
+                    st.session_state._next_scope = db.create_project(new_name, new_instr)
+                    st.session_state.current_conv_id = None
+                    st.rerun()
+                else:
+                    st.warning("Escribe un nombre para el proyecto.")
+
+
+with st.sidebar:
+    render_brand()
+
+    if st.button("✏️ Nueva conversación", use_container_width=True, type="primary"):
+        st.session_state.current_conv_id = None
+        st.rerun()
+
+    # ---------- Proyectos ----------
+    scope_options = [db.SCOPE_ALL, db.SCOPE_NONE] + [p["id"] for p in projects]
+    scope_labels = {db.SCOPE_ALL: "Todas las conversaciones", db.SCOPE_NONE: "Sin proyecto",
+                    **project_names}
+    # Cambios de proyecto pedidos por botones se aplican ANTES de dibujar el selector
+    if "_next_scope" in st.session_state:
+        st.session_state.project_scope = st.session_state.pop("_next_scope")
+    if st.session_state.project_scope not in scope_options:
+        st.session_state.project_scope = db.SCOPE_ALL
+    scope = st.session_state.project_scope
+
+    with st.container(horizontal=True, vertical_alignment="center", gap="small"):
+        st.markdown('<p class="mi-label">📁 Proyectos</p>', unsafe_allow_html=True, width="stretch")
+        render_project_forms(scope)
+
+    st.selectbox(
+        "Proyecto",
+        scope_options,
+        format_func=lambda x: ("📁 " if x not in (db.SCOPE_ALL, db.SCOPE_NONE) else "") + scope_labels[x],
+        key="project_scope",
+        label_visibility="collapsed",
+    )
+    scope = st.session_state.project_scope
+
     # ---------- Conversaciones ----------
-    st.subheader("💬 Conversaciones")
+    st.markdown('<p class="mi-label" style="margin-top:0.5rem">💬 Recientes</p>', unsafe_allow_html=True)
     conversations = db.list_conversations(scope)
-    if not conversations:
-        st.caption("Aún no hay conversaciones aquí.")
-    for conv in conversations:
-        is_current = conv["id"] == st.session_state.current_conv_id
-        icon = "🔗" if conv["share_token"] else "💬"
-        if st.button(f"{icon} {conv['title']}", key=f"conv_{conv['id']}",
-                     use_container_width=True, type="primary" if is_current else "secondary"):
-            st.session_state.current_conv_id = conv["id"]
-            st.rerun()
+    with st.container(key="conv_list"):
+        if not conversations:
+            st.caption("Aún no hay conversaciones aquí.")
+        for conv in conversations:
+            is_current = conv["id"] == st.session_state.current_conv_id
+            icon = "🔗" if conv["share_token"] else "💬"
+            if st.button(f"{icon} {conv['title']}", key=f"conv_{conv['id']}",
+                         use_container_width=True, type="primary" if is_current else "tertiary",
+                         help="Conversación compartida" if conv["share_token"] else None):
+                st.session_state.current_conv_id = conv["id"]
+                st.rerun()
 
     st.divider()
 
@@ -480,7 +624,7 @@ with st.sidebar:
             seen_names.add(p.name)
             pdf_list.append(p)
 
-    with st.expander("📚 Materiales del curso"):
+    with st.expander(f"📚 Materiales del curso · {len(pdf_list)} PDF"):
         for p in pdf_list:
             st.markdown(f"- 📄 `{p.name}`")
         if not pdf_list:
@@ -527,15 +671,12 @@ with st.sidebar:
             with st.expander("⚠️ Último error técnico"):
                 st.code(st.session_state.last_error, language=None, wrap_lines=True)
 
-    st.markdown('<div class="sidebar-footer">Equipo Mentor.ia · UAEM Tianguistenco · v2.0</div>',
-                unsafe_allow_html=True)
+    st.markdown('<p class="mi-footer">Equipo Mentor.ia · v2.0</p>', unsafe_allow_html=True)
 
 
 # ==============================================================================
 # ÁREA PRINCIPAL
 # ==============================================================================
-render_header()
-
 current_conv = db.get_conversation(st.session_state.current_conv_id)
 messages = db.get_messages(current_conv["id"]) if current_conv else []
 
@@ -555,93 +696,93 @@ else:
     active_project_id = scope if scope not in (db.SCOPE_ALL, db.SCOPE_NONE) else None
 active_project = db.get_project(active_project_id)
 
-# ---------- Barra de acciones de la conversación ----------
+# ---------- Encabezado de la conversación: título, proyecto y acciones ----------
 if current_conv:
-    col_title, col_opts, col_share, col_export = st.columns([5, 1.3, 1.3, 1.3])
-    with col_title:
-        st.markdown(f"### {current_conv['title']}")
-        if active_project:
-            st.caption(f"📁 {active_project['name']}")
+    with st.container(horizontal=True, vertical_alignment="center", key="topbar"):
+        chip = f'<span class="mi-chip">📁 {esc(active_project["name"])}</span>' if active_project else ""
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:12px;min-width:0">'
+            f'<p class="mi-title">{esc(current_conv["title"])}</p>{chip}</div>',
+            unsafe_allow_html=True,
+            width="stretch",
+        )
+        with st.container(horizontal=True, gap="small", width="content", key="topbar_actions"):
+            with st.popover("🔗 Compartir"):
+                if current_conv["share_token"]:
+                    st.success("Cualquiera con el enlace puede verla (solo lectura).")
+                    st.code(f"{APP_BASE_URL}/?share={current_conv['share_token']}", language=None)
+                    if st.button("Dejar de compartir", use_container_width=True):
+                        db.disable_share(current_conv["id"])
+                        st.rerun()
+                else:
+                    st.caption("Genera un enlace de solo lectura para tus compañeros o alumnos.")
+                    if st.button("Crear enlace", use_container_width=True, type="primary"):
+                        db.enable_share(current_conv["id"])
+                        st.rerun()
 
-    with col_opts:
-        with st.popover("⚙️ Opciones", use_container_width=True):
-            new_title = st.text_input("Renombrar", value=current_conv["title"])
-            if st.button("Guardar nombre", use_container_width=True) and new_title.strip():
-                db.rename_conversation(current_conv["id"], new_title)
-                st.rerun()
+            with st.popover("📥 Exportar"):
+                render_export_buttons(current_conv, messages, key_prefix="own")
 
-            move_options = [None] + [p["id"] for p in projects]
-            target = st.selectbox(
-                "Mover a proyecto",
-                move_options,
-                index=move_options.index(current_conv["project_id"])
-                if current_conv["project_id"] in move_options else 0,
-                format_func=lambda x: "Sin proyecto" if x is None else project_names[x],
-            )
-            if st.button("Mover", use_container_width=True):
-                db.move_conversation(current_conv["id"], target)
-                st.rerun()
-
-            st.divider()
-            if st.button("🗑️ Eliminar conversación", use_container_width=True):
-                db.delete_conversation(current_conv["id"])
-                st.session_state.current_conv_id = None
-                st.rerun()
-
-    with col_share:
-        with st.popover("🔗 Compartir", use_container_width=True):
-            if current_conv["share_token"]:
-                st.success("Cualquiera con el enlace puede verla (solo lectura).")
-                st.code(f"{APP_BASE_URL}/?share={current_conv['share_token']}", language=None)
-                if st.button("Dejar de compartir", use_container_width=True):
-                    db.disable_share(current_conv["id"])
-                    st.rerun()
-            else:
-                st.caption("Genera un enlace de solo lectura para tus compañeros o alumnos.")
-                if st.button("Crear enlace", use_container_width=True, type="primary"):
-                    db.enable_share(current_conv["id"])
+            with st.popover("⚙️", help="Renombrar, mover o eliminar"):
+                new_title = st.text_input("Renombrar", value=current_conv["title"])
+                if st.button("Guardar nombre", use_container_width=True) and new_title.strip():
+                    db.rename_conversation(current_conv["id"], new_title)
                     st.rerun()
 
-    with col_export:
-        with st.popover("📥 Exportar", use_container_width=True):
-            render_export_buttons(current_conv, messages, key_prefix="own")
+                move_options = [None] + [p["id"] for p in projects]
+                target = st.selectbox(
+                    "Mover a proyecto",
+                    move_options,
+                    index=move_options.index(current_conv["project_id"])
+                    if current_conv["project_id"] in move_options else 0,
+                    format_func=lambda x: "Sin proyecto" if x is None else project_names[x],
+                )
+                if st.button("Mover", use_container_width=True):
+                    db.move_conversation(current_conv["id"], target)
+                    st.rerun()
 
-elif active_project:
-    st.caption(f"📁 Nueva conversación en **{active_project['name']}**")
+                st.divider()
+                if st.button("🗑️ Eliminar conversación", use_container_width=True):
+                    db.delete_conversation(current_conv["id"])
+                    st.session_state.current_conv_id = None
+                    st.rerun()
 
-# ---------- Bienvenida y sugerencias ----------
-WELCOME_MESSAGE = """¡Hola! 👋 Soy Mentor.ia, tu copiloto para el proyecto final de la materia de Inteligencia Artificial.
-
-Puedo ayudarte con:
-- 📚 Entender conceptos de IA (RAG, LLMs, embeddings, agentes...)
-- ✏️ Redactar los apartados de tu documento académico
-- 🛠️ Resolver dudas técnicas de Antigravity
-- 💡 Elegir y delimitar el tema de tu proyecto
-- 🎯 Organizar el trabajo en equipo
-- 📄 Darte guías y resúmenes en PDF o Word (por ejemplo: *"hazme una guía de la unidad 1 en PDF"*)
-
-Cuéntame, ¿en qué estás trabajando ahora mismo?"""
+# ---------- Pantalla de inicio (conversación vacía) ----------
+SUGGESTIONS = [
+    ("📚", "¿Qué es un agente inteligente?", "Conceptos clave de la Unidad 1"),
+    ("🎯", "Explícame el algoritmo K-Means", "Con un ejemplo paso a paso"),
+    ("📄", "Hazme una mini guía de la unidad 1 en PDF", "Resumen descargable de una unidad"),
+    ("✏️", "Ayúdame con la justificación de mi proyecto", "Estructura y preguntas guía"),
+]
 
 chip_prompt = None
 if not messages:
-    with st.chat_message("assistant", avatar="🎓"):
-        st.markdown(WELCOME_MESSAGE)
-
+    where = esc(active_project["name"]) if active_project else "Sin proyecto"
     st.markdown(
-        "<div style='margin-top: 1rem; margin-bottom: 0.5rem; font-size: 0.85rem; color: #8FAADC; font-weight: 600;'>💡 Sugerencias para comenzar:</div>",
+        f"""
+        <div class="mi-hero">
+            <span class="mi-tile">🎓</span>
+            <h1>¿En qué estás trabajando hoy?</h1>
+            <p>Soy Mentor.ia, tu copiloto para el proyecto final de Inteligencia Artificial.
+               Pregunta sobre los materiales del curso, pide una guía en PDF o revisa tu proyecto.</p>
+            <span class="mi-chip">📁 Se guardará en: {where}</span>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("¿Qué es un agente inteligente?", use_container_width=True):
-            chip_prompt = "¿Qué es un agente inteligente?"
-        if st.button("¿Qué es RAG?", use_container_width=True):
-            chip_prompt = "¿Qué es RAG?"
-    with col2:
-        if st.button("Explícame el algoritmo K-Means", use_container_width=True):
-            chip_prompt = "Explícame el algoritmo K-Means"
-        if st.button("Ayúdame con la justificación de mi proyecto", use_container_width=True):
-            chip_prompt = "Ayúdame con la justificación de mi proyecto"
+    for row in (SUGGESTIONS[:2], SUGGESTIONS[2:]):
+        cols = st.columns(2)
+        for col, (icon, prompt, desc) in zip(cols, row):
+            idx = SUGGESTIONS.index((icon, prompt, desc))
+            with col, st.container(border=True, key=f"sug_{idx}"):
+                st.markdown(
+                    f'<div class="mi-sug-title">{icon} {esc(prompt)}</div>'
+                    f'<div class="mi-sug-desc">{esc(desc)}</div>',
+                    unsafe_allow_html=True,
+                )
+                # Botón invisible que cubre toda la tarjeta (ver estilos .st-key-sug_)
+                if st.button(prompt, key=f"sugbtn_{idx}", use_container_width=True):
+                    chip_prompt = prompt
 
 render_messages(messages, editable=True, conv=current_conv)
 
@@ -650,13 +791,10 @@ render_messages(messages, editable=True, conv=current_conv)
 if st.session_state.pop("scroll_after_answer", False):
     scroll_to_bottom(seconds=2)
 
-user_input = st.chat_input("Escribe tu pregunta o duda académica aquí...")
+user_input = st.chat_input("Pregunta lo que quieras o pide una guía en PDF…")
 st.markdown(
-    """
-    <div class="composer-footer">
-        💡 Enter para enviar &nbsp;|&nbsp; Mentor.ia puede equivocarse. Verifica información crítica con la profesora.
-    </div>
-    """,
+    '<p class="mi-composer-note">💡 Mentor.ia puede equivocarse. '
+    "Verifica información crítica con la profesora.</p>",
     unsafe_allow_html=True,
 )
 
@@ -678,7 +816,7 @@ if prompt_to_process:
     db.add_message(conv_id, "user", prompt_to_process)
     scroll_to_bottom()
     with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt_to_process)
+        render_user_message(prompt_to_process, "live")
 
     # ¿Pidió la respuesta como archivo? ("dámelo en PDF", "hazme una guía en Word"...)
     document_format = detect_document_request(prompt_to_process)
@@ -714,7 +852,7 @@ if prompt_to_process:
                 elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
                 if sources:
-                    render_sources(sources, search_query, prompt_to_process)
+                    render_sources(sources, "live", search_query, prompt_to_process)
 
                 db.add_message(conv_id, "assistant", answer, sources=sources,
                                search_query=search_query, original_query=prompt_to_process,
