@@ -1,4 +1,6 @@
+import re
 import time
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -12,7 +14,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from src.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
-    GEMINI_FALLBACK_MODEL,
+    GEMINI_FALLBACK_MODELS,
     GEMINI_THINKING_LEVEL,
     EMBEDDINGS_MODEL,
     DOCS_DIR,
@@ -41,6 +43,7 @@ CAPACIDADES:
 - Resuelves dudas técnicas sobre la plataforma Antigravity.
 - Sugieres metodologías de trabajo en equipo (SCRUM).
 - Ayudas a delimitar el alcance de proyectos de IA.
+- Generas documentos descargables (PDF, Word o Markdown) como guías de estudio o resúmenes: la aplicación convierte tu respuesta en el archivo. NUNCA digas que no puedes generar archivos o PDFs. Si el estudiante pide un archivo y no recibes la nota de documento, dile que escriba, por ejemplo, "dámelo en PDF", o que use el botón 📥 Exportar.
 
 REGLAS ESTRICTAS:
 - NO escribas el proyecto completo por el estudiante. Guíalo, no lo reemplaces.
@@ -51,6 +54,46 @@ REGLAS ESTRICTAS:
 - Termina cada respuesta con una pregunta de seguimiento para mantener la conversación activa.
 - NO opines sobre temas ajenos a la materia (política, religión, etc.).
 - NO manejes datos sensibles de los estudiantes."""
+
+# ==============================================================================
+# PETICIONES DE DOCUMENTO ("dámelo en PDF", "hazme una guía en Word", ...)
+# ==============================================================================
+_FORMAT_WORDS = r"(pdf|word|docx|markdown|md)"
+_DOC_PATTERNS = [
+    # "en PDF", "como Word", "a formato markdown", "en un archivo PDF"
+    rf"\b(en|como|a|formato)\s+(un\s+|una\s+)?(archivo\s+|documento\s+|formato\s+)?{_FORMAT_WORDS}\b",
+    # "genera un PDF", "hazme un documento", "dame el archivo", "pásamelo en word"
+    r"\b(genera|crea|haz|hazme|dame|da|pasa|pásame|pasame|exporta|descarga|convierte|quiero|necesito)\w*"
+    rf"\s+(me\s+|lo\s+|la\s+)?(un|una|el|la|en)?\s*(pdf|word|docx|documento|archivo)\b",
+]
+
+
+def detect_document_request(text: str) -> Optional[str]:
+    """
+    Detecta si el estudiante pide su respuesta como archivo y en qué formato.
+    Retorna "pdf", "docx", "md" o None. Evita confundirse con los PDFs del curso:
+    "¿qué dice el pdf de la unidad 1?" NO es una petición de documento.
+    """
+    lower = text.lower()
+    if not any(re.search(p, lower) for p in _DOC_PATTERNS):
+        return None
+    if re.search(r"\b(word|docx)\b", lower):
+        return "docx"
+    if re.search(r"\b(markdown|md)\b", lower):
+        return "md"
+    return "pdf"  # "pdf", "documento" o "archivo" sin formato -> PDF
+
+
+DOCUMENT_INSTRUCTION = (
+    "\n\n[NOTA DE DOCUMENTO: El estudiante pidió esto como archivo {fmt}. La aplicación "
+    "convertirá tu respuesta en el archivo descargable automáticamente. Escribe SOLO el "
+    "contenido completo del documento en Markdown: empieza con una línea '# Título', usa "
+    "subtítulos (##) y viñetas, sin saludos, sin pregunta final y sin límite de 150 palabras. "
+    "Si pide 'eso' o 'lo anterior', reescribe completo el contenido de tu respuesta anterior. "
+    "Mantén las citas [Fuente: archivo.pdf, pág. X].]"
+)
+_FORMAT_NAMES = {"pdf": "PDF", "docx": "Word", "md": "Markdown"}
+
 
 def get_available_pdfs() -> List[Path]:
     """Retorna la lista de archivos PDF únicos disponibles en la carpeta docs/."""
@@ -110,13 +153,57 @@ def _build_chat_model(model: str, thinking_level: Optional[str], timeout: float)
     return ChatGoogleGenerativeAI(**kwargs)
 
 
+# Algunos modelos (p. ej. los "lite") ignoran la temperatura y avisan en cada llamada
+warnings.filterwarnings("ignore", message=".*uses fixed sampling defaults.*")
+
+# Si un modelo falla por saturación, se deja "en pausa" unos minutos y se prueba al final,
+# para no esperar su error en cada pregunta. Se comparte entre todos los usuarios.
+MODEL_COOLDOWN_SECONDS = 180
+_cooldown_until: Dict[str, float] = {}
+_TRANSIENT_ERRORS = ("503", "UNAVAILABLE", "overloaded", "429", "RESOURCE_EXHAUSTED",
+                     "timeout", "timed out", "deadline")
+
+
+def _pause_model_if_saturated(name: str, error: Exception) -> None:
+    text = str(error)
+    if any(word.lower() in text.lower() for word in _TRANSIENT_ERRORS):
+        _cooldown_until[name] = time.monotonic() + MODEL_COOLDOWN_SECONDS
+
+
 def get_chat_models() -> List[ChatGoogleGenerativeAI]:
-    """Lista de modelos en orden de preferencia: [principal, respaldo]."""
+    """
+    Modelos en orden de preferencia: [principal, respaldo 1, respaldo 2, ...].
+    Los que fallaron hace poco por saturación pasan al final de la lista.
+    """
     models = [_build_chat_model(GEMINI_MODEL, GEMINI_THINKING_LEVEL, LLM_TIMEOUT_SECONDS)]
-    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
-        # El respaldo usa la configuración por defecto para ser compatible con cualquier versión
-        models.append(_build_chat_model(GEMINI_FALLBACK_MODEL, None, LLM_FALLBACK_TIMEOUT_SECONDS))
-    return models
+    for name in dict.fromkeys(GEMINI_FALLBACK_MODELS):  # Sin repetidos, en orden
+        # Los respaldos usan la configuración por defecto para ser compatibles con cualquier versión
+        models.append(_build_chat_model(name, None, LLM_FALLBACK_TIMEOUT_SECONDS))
+    now = time.monotonic()
+    paused = lambda m: _cooldown_until.get(getattr(m, "model", ""), 0) > now
+    return [m for m in models if not paused(m)] + [m for m in models if paused(m)]
+
+
+def diagnose_models() -> List[Dict[str, Any]]:
+    """
+    Prueba cada modelo configurado con una pregunta mínima.
+    Se usa en el panel de administrador para saber cuáles responden con tu clave.
+    """
+    results = []
+    for model in get_chat_models():
+        start = time.perf_counter()
+        try:
+            reply = model.invoke([HumanMessage(content="Responde solo con la palabra: OK")])
+            ok, detail = True, extract_text_content(reply.content)[:80] or "(respuesta vacía)"
+        except Exception as e:
+            ok, detail = False, str(e)[:400]
+        results.append({
+            "model": getattr(model, "model", "?"),
+            "ok": ok,
+            "seconds": round(time.perf_counter() - start, 1),
+            "detail": detail,
+        })
+    return results
 
 
 def get_llm_model():
@@ -285,6 +372,7 @@ def prepare_mentor_messages(
     chat_history: Optional[List[Dict[str, Any]]] = None,
     vectorstore: Optional[FAISS] = None,
     project_instructions: Optional[str] = None,
+    document_format: Optional[str] = None,
 ) -> Tuple[List[Any], List[Dict[str, Any]], str]:
     """
     Paso 1 de la respuesta: busca en los PDFs y arma los mensajes para Gemini.
@@ -344,6 +432,8 @@ def prepare_mentor_messages(
             "[Nota: Actualmente no hay documentos de referencia indexados en la carpeta docs/]. "
             "Responde como Mentor.ia brindando una explicación educativa clara con tu conocimiento general."
         )
+    if document_format:
+        user_prompt += DOCUMENT_INSTRUCTION.format(fmt=_FORMAT_NAMES.get(document_format, "PDF"))
     messages.append(HumanMessage(content=user_prompt))
 
     return messages, sources, search_query
@@ -357,8 +447,9 @@ def stream_mentor_answer(messages: List[Any]) -> Iterator[str]:
     Se hace a mano porque Gemini envía primero pedazos vacíos (su "pensamiento")
     y el respaldo automático de LangChain ya no se activaría después de ellos.
     """
-    last_error: Optional[Exception] = None
+    errors: List[str] = []
     for model in get_chat_models():
+        name = getattr(model, "model", "?")
         wrote_text = False
         try:
             for chunk in model.stream(messages):
@@ -370,10 +461,10 @@ def stream_mentor_answer(messages: List[Any]) -> Iterator[str]:
         except Exception as e:
             if wrote_text:
                 raise  # Ya se mostró parte de la respuesta: no mezclar dos modelos
-            print(f"El modelo {getattr(model, 'model', '?')} falló ({e}). Probando con el de respaldo...")
-            last_error = e
-    if last_error:
-        raise last_error
+            print(f"El modelo {name} falló ({e}). Probando con el siguiente...")
+            _pause_model_if_saturated(name, e)
+            errors.append(f"[{name}] {e}")
+    raise RuntimeError("Ningún modelo pudo responder:\n" + "\n".join(errors))
 
 
 def query_mentor(

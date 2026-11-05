@@ -9,6 +9,7 @@ Idea general:
 import io
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from docx import Document
@@ -86,22 +87,25 @@ def export_markdown(
     messages: List[Dict[str, Any]],
     project_name: Optional[str] = None,
     include_sources: bool = True,
+    role_headings: bool = True,
 ) -> bytes:
     out = [f"# {conv['title']}", ""]
     out += [f"> {line}  " for line in _header_info(conv, project_name)]
     out += ["", "---", ""]
 
     for msg in messages:
-        out.append(f"## {ROLE_LABELS.get(msg['role'], msg['role'])}")
-        out.append("")
-        # Baja un nivel los títulos de la respuesta para que no compitan con "## Mentor.ia"
+        if role_headings:
+            out.append(f"## {ROLE_LABELS.get(msg['role'], msg['role'])}")
+            out.append("")
+        # Baja un nivel los títulos de la respuesta para que no compitan con el título principal
         out.append(re.sub(r"(?m)^(#{1,5})(\s)", r"#\1\2", msg["content"]))
         out.append("")
         if include_sources and msg.get("sources"):
             out.append("**Fuentes:**")
             out += [f"- {_format_source(s)}" for s in msg["sources"]]
             out.append("")
-        out += ["---", ""]
+        if role_headings:
+            out += ["---", ""]
 
     return "\n".join(out).encode("utf-8")
 
@@ -125,6 +129,7 @@ def export_docx(
     messages: List[Dict[str, Any]],
     project_name: Optional[str] = None,
     include_sources: bool = True,
+    role_headings: bool = True,
 ) -> bytes:
     doc = Document()
     doc.styles["Normal"].font.name = "Calibri"
@@ -137,11 +142,13 @@ def export_docx(
         p.runs[0].font.color.rgb = RGBColor(0x6B, 0x7A, 0x92)
 
     for msg in messages:
-        doc.add_heading(ROLE_LABELS.get(msg["role"], msg["role"]), level=1)
+        if role_headings:
+            doc.add_heading(ROLE_LABELS.get(msg["role"], msg["role"]), level=1)
 
         for kind, text in _parse_blocks(msg["content"]):
             if kind.startswith("h"):
-                doc.add_heading(_strip_inline(text), level=int(kind[1]) + 1)
+                level = int(kind[1]) + (1 if role_headings else 0)
+                doc.add_heading(_strip_inline(text), level=level)
             elif kind == "bullet":
                 _add_rich_runs(doc.add_paragraph(style="List Bullet"), text)
             elif kind == "number":
@@ -168,17 +175,50 @@ def export_docx(
 # ==============================================================================
 # PDF
 # ==============================================================================
-# Las fuentes base del PDF solo aceptan Latin-1 (incluye acentos y ñ, no emojis).
-_PDF_REPLACEMENTS = {
+# Fuentes incluidas en el repo (assets/fonts) para que el PDF muestre acentos,
+# símbolos y emojis igual en cualquier computadora o servidor:
+#   - DejaVu Sans / DejaVu Sans Mono: texto y código (casi todo Unicode).
+#   - NotoEmoji-Basic: emojis a color de Noto Color Emoji, reducida a ~1,500 emojis
+#     básicos (sin banderas ni tonos de piel) para pesar 3 MB en lugar de 11 MB.
+FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+_PDF_FONTS = {
+    ("text", ""): "DejaVuSans.ttf",
+    ("text", "B"): "DejaVuSans-Bold.ttf",
+    ("text", "I"): "DejaVuSans-Oblique.ttf",
+    ("mono", ""): "DejaVuSansMono.ttf",
+    ("emoji", ""): "NotoEmoji-Basic.ttf",
+}
+
+# Si faltan las fuentes, se usan las básicas del PDF (solo Latin-1: sin emojis)
+_LATIN1_REPLACEMENTS = {
     "•": "-", "–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'",
     "…": "...", "→": "->", "←": "<-", "≤": "<=", "≥": ">=", "≠": "!=",
 }
 
 
-def _pdf_safe(text: str) -> str:
-    for bad, good in _PDF_REPLACEMENTS.items():
-        text = text.replace(bad, good)
-    return text.encode("latin-1", "ignore").decode("latin-1").strip()
+def _fonts_available() -> bool:
+    return all((FONTS_DIR / name).exists() for name in _PDF_FONTS.values())
+
+
+def _setup_pdf_fonts(pdf: FPDF) -> Dict[str, str]:
+    """Registra las fuentes y devuelve el nombre a usar para 'text' y 'mono'."""
+    if not _fonts_available():
+        return {"text": "Helvetica", "mono": "Courier", "unicode": ""}
+    for (family, style), file_name in _PDF_FONTS.items():
+        pdf.add_font(family, style, str(FONTS_DIR / file_name))
+    # Si un carácter (emoji) no existe en DejaVu, se busca en la fuente de emojis
+    pdf.set_fallback_fonts(["emoji"], exact_match=False)
+    return {"text": "text", "mono": "mono", "unicode": "1"}
+
+
+def _clean_for_pdf(text: str, unicode_fonts: bool) -> str:
+    # El "selector de variación" (U+FE0F) que acompaña a emojis como ✏️ no se dibuja
+    text = text.replace("\ufe0f", "").replace("\u200d", "")
+    if not unicode_fonts:
+        for bad, good in _LATIN1_REPLACEMENTS.items():
+            text = text.replace(bad, good)
+        text = text.encode("latin-1", "ignore").decode("latin-1")
+    return text.strip()
 
 
 def export_pdf(
@@ -186,17 +226,22 @@ def export_pdf(
     messages: List[Dict[str, Any]],
     project_name: Optional[str] = None,
     include_sources: bool = True,
+    role_headings: bool = True,
 ) -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    fonts = _setup_pdf_fonts(pdf)
+    unicode_fonts = bool(fonts["unicode"])
 
-    def write(text: str, size: int = 11, style: str = "", font: str = "Helvetica",
+    def write(text: str, size: int = 11, style: str = "", font: str = "text",
               indent: int = 0, height: float = 6) -> None:
-        text = _pdf_safe(text)
+        text = _clean_for_pdf(text, unicode_fonts)
         if not text:
             return
-        pdf.set_font(font, style, size)
+        if font == "mono":
+            style = ""  # Solo se incluye la variante normal de la fuente de código
+        pdf.set_font(fonts[font], style, size)
         pdf.set_x(pdf.l_margin + indent)
         pdf.multi_cell(0, height, text, align="L", new_x="LMARGIN", new_y="NEXT")
 
@@ -208,19 +253,22 @@ def export_pdf(
     pdf.ln(4)
 
     for msg in messages:
-        pdf.set_text_color(68, 114, 196)
-        write(ROLE_LABELS.get(msg["role"], msg["role"]), size=13, style="B", height=8)
-        pdf.set_text_color(0, 0, 0)
+        if role_headings:
+            pdf.set_text_color(68, 114, 196)
+            write(ROLE_LABELS.get(msg["role"], msg["role"]), size=13, style="B", height=8)
+            pdf.set_text_color(0, 0, 0)
 
         for kind, text in _parse_blocks(msg["content"]):
             if kind.startswith("h"):
-                write(_strip_inline(text), size=12, style="B")
+                pdf.ln(2)  # Un poco de aire antes de cada título
+                size = 12 if role_headings else {"h1": 15, "h2": 13}.get(kind, 12)
+                write(_strip_inline(text), size=size, style="B")
             elif kind == "bullet":
-                write("- " + _strip_inline(text), indent=4)
+                write("• " + _strip_inline(text), indent=4)
             elif kind == "number":
                 write(_strip_inline(text), indent=4)
             elif kind == "code":
-                write(text, size=9, font="Courier", indent=4, height=5)
+                write(text, size=9, font="mono", indent=4, height=5)
             else:
                 write(_strip_inline(text))
 
@@ -230,3 +278,37 @@ def export_pdf(
         pdf.ln(3)
 
     return bytes(pdf.output())
+
+
+# ==============================================================================
+# DOCUMENTO A PARTIR DE UNA SOLA RESPUESTA
+# ==============================================================================
+DOCUMENT_FORMATS = {
+    # formato: (etiqueta, extensión, tipo MIME)
+    "pdf": ("📕 PDF", "pdf", "application/pdf"),
+    "docx": ("📄 Word", "docx",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    "md": ("📝 Markdown", "md", "text/markdown"),
+}
+
+
+def split_document_title(content: str, default_title: str) -> Tuple[str, str]:
+    """Si la respuesta empieza con '# Título', lo usa como título del documento."""
+    lines = content.strip().splitlines()
+    if lines and re.match(r"^#\s+\S", lines[0]):
+        return _strip_inline(lines[0].lstrip("#").strip()), "\n".join(lines[1:]).strip()
+    return default_title, content
+
+
+def export_document(
+    content: str,
+    fmt: str,
+    default_title: str,
+    sources: Optional[List[Dict[str, Any]]] = None,
+    project_name: Optional[str] = None,
+) -> bytes:
+    """Convierte UNA respuesta (p. ej. una guía de estudio) en un archivo PDF, Word o Markdown."""
+    title, body = split_document_title(content, default_title)
+    exporter = {"pdf": export_pdf, "docx": export_docx, "md": export_markdown}[fmt]
+    message = {"role": "assistant", "content": body, "sources": sources}
+    return exporter({"title": title}, [message], project_name, True, role_headings=False)
