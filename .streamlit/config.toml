@@ -4,4 +4,18 @@ primaryColor = "#4472C4"
 backgroundColor = "#0e1117"
 secondaryBackgroundColor = "#15192a"
 textColor = "#e8ecf2"
+linkColor = "#8FAADC"
+borderColor = "#1f2937"
+showWidgetBorder = true
+baseRadius = "10px"
+buttonRadius = "8px"
 font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#15192a"
+secondaryBackgroundColor = "#0e1117"
+borderColor = "#1f2937"
+
+[client]
+# Oculta el botón "Deploy" y el menú de desarrollador a los visitantes
+toolbarMode = "viewer"
