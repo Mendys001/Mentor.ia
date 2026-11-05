@@ -1,23 +1,28 @@
-import os
 import time
+from functools import lru_cache
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from src.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    GEMINI_FALLBACK_MODEL,
+    GEMINI_THINKING_LEVEL,
     EMBEDDINGS_MODEL,
     DOCS_DIR,
     VECTORSTORE_DIR,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
+    LLM_MAX_RETRIES,
+    LLM_TIMEOUT_SECONDS,
+    LLM_FALLBACK_TIMEOUT_SECONDS,
+    REWRITE_MAX_WORDS,
 )
 
 SYSTEM_PROMPT = """Eres Mentor.ia, un chatbot copiloto académico especializado en acompañar a estudiantes de la Licenciatura en Ingeniería en Software del Centro Universitario UAEM Tianguistenco durante el desarrollo de su proyecto final de Inteligencia Artificial.
@@ -77,8 +82,9 @@ def load_pdf_documents() -> List[Any]:
     return documents
 
 
+@lru_cache(maxsize=1)
 def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
-    """Instancia y retorna el modelo de embeddings de Gemini."""
+    """Modelo de embeddings de Gemini (se crea una sola vez y se reutiliza)."""
     if not GEMINI_API_KEY:
         raise ValueError("No se ha configurado GEMINI_API_KEY en el archivo .env")
     return GoogleGenerativeAIEmbeddings(
@@ -87,15 +93,39 @@ def get_embeddings_model() -> GoogleGenerativeAIEmbeddings:
     )
 
 
-def get_llm_model() -> ChatGoogleGenerativeAI:
-    """Instancia y retorna el modelo conversacional de Gemini."""
+@lru_cache(maxsize=4)
+def _build_chat_model(model: str, thinking_level: Optional[str], timeout: float) -> ChatGoogleGenerativeAI:
+    """Crea (una sola vez por combinación) un cliente de chat de Gemini."""
     if not GEMINI_API_KEY:
         raise ValueError("No se ha configurado GEMINI_API_KEY en el archivo .env")
-    return ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
+    kwargs: Dict[str, Any] = dict(
+        model=model,
         google_api_key=GEMINI_API_KEY,
         temperature=0.3,
+        max_retries=LLM_MAX_RETRIES,   # Falla rápido y pasa al modelo de respaldo
+        timeout=timeout,
     )
+    if thinking_level:
+        kwargs["thinking_level"] = thinking_level  # Menos "pensamiento" = respuesta más rápida
+    return ChatGoogleGenerativeAI(**kwargs)
+
+
+def get_chat_models() -> List[ChatGoogleGenerativeAI]:
+    """Lista de modelos en orden de preferencia: [principal, respaldo]."""
+    models = [_build_chat_model(GEMINI_MODEL, GEMINI_THINKING_LEVEL, LLM_TIMEOUT_SECONDS)]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        # El respaldo usa la configuración por defecto para ser compatible con cualquier versión
+        models.append(_build_chat_model(GEMINI_FALLBACK_MODEL, None, LLM_FALLBACK_TIMEOUT_SECONDS))
+    return models
+
+
+def get_llm_model():
+    """
+    Modelo para respuestas completas (sin streaming). Si el principal falla
+    (503, límite de uso, tiempo agotado), LangChain usa el de respaldo.
+    """
+    primary, *fallbacks = get_chat_models()
+    return primary.with_fallbacks(fallbacks) if fallbacks else primary
 
 
 def build_or_load_vectorstore(force_reload: bool = False) -> Tuple[Optional[FAISS], str]:
@@ -187,7 +217,7 @@ INSTRUCCIONES:
 def reformulate_query_for_retrieval(
     query: str,
     chat_history: Optional[List[Dict[str, str]]],
-    llm: ChatGoogleGenerativeAI,
+    llm: Any,
 ) -> str:
     """
     Reescribe una pregunta de seguimiento para convertirla en una consulta independiente
@@ -229,31 +259,50 @@ def reformulate_query_for_retrieval(
     return query
 
 
-def query_mentor(
+# Mensajes guardados que en realidad son errores; no se envían al modelo como historial
+ERROR_PREFIXES = ("❌", "⏳", "⚠️ **No se ha detectado")
+
+
+def clean_history(chat_history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Quita del historial las respuestas de error y la pregunta que las provocó."""
+    cleaned: List[Dict[str, Any]] = []
+    for msg in chat_history or []:
+        if msg.get("role") == "assistant" and msg.get("content", "").startswith(ERROR_PREFIXES):
+            if cleaned and cleaned[-1].get("role") == "user":
+                cleaned.pop()
+            continue
+        cleaned.append(msg)
+    return cleaned
+
+
+def needs_rewrite(query: str, chat_history: List[Dict[str, Any]]) -> bool:
+    """Solo las preguntas cortas de seguimiento ("¿y un ejemplo?") necesitan el historial."""
+    return bool(chat_history) and len(query.split()) <= REWRITE_MAX_WORDS
+
+
+def prepare_mentor_messages(
     query: str,
-    chat_history: Optional[List[Dict[str, str]]] = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
     vectorstore: Optional[FAISS] = None,
-) -> Dict[str, Any]:
+    project_instructions: Optional[str] = None,
+) -> Tuple[List[Any], List[Dict[str, Any]], str]:
     """
-    Genera una respuesta educativa usando RAG (si el vectorstore está activo)
-    o directamente con el tutor Gemini si aún no hay documentos cargados.
-    Implementa history-aware retrieval para contextualizar preguntas de seguimiento.
+    Paso 1 de la respuesta: busca en los PDFs y arma los mensajes para Gemini.
+    Retorna (mensajes, fuentes, consulta_de_búsqueda).
     """
-    llm = get_llm_model()
-    sources = []
+    history = clean_history(chat_history)
+    sources: List[Dict[str, Any]] = []
     context_text = ""
 
-    # Determinar la consulta de búsqueda mediante query rewriting si hay historial
+    # Reformular solo preguntas cortas de seguimiento (ahorra una llamada completa al modelo)
     search_query = query
-    if vectorstore is not None and chat_history:
-        search_query = reformulate_query_for_retrieval(query, chat_history, llm)
+    if vectorstore is not None and needs_rewrite(query, history):
+        search_query = reformulate_query_for_retrieval(query, history, get_llm_model())
 
     # Recuperación de contexto si hay vectorstore
     if vectorstore is not None:
         try:
-            retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-            retrieved_docs = retriever.invoke(search_query)
-
+            retrieved_docs = vectorstore.similarity_search(search_query, k=4)
             context_snippets = []
             for doc in retrieved_docs:
                 file_name = doc.metadata.get("file_name", "Documento")
@@ -266,43 +315,76 @@ def query_mentor(
                     "page": page,
                     "snippet": content[:250] + ("..." if len(content) > 250 else ""),
                 })
-
             context_text = "\n\n".join(context_snippets)
         except Exception as e:
             print(f"Error al recuperar contexto: {e}")
 
-    # Formulación del prompt conversacional
-    messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    # Prompt del sistema + instrucciones del proyecto
+    system_prompt = SYSTEM_PROMPT
+    if project_instructions:
+        system_prompt += f"\n\nINSTRUCCIONES DEL PROYECTO ACTUAL:\n{project_instructions}"
+    messages: List[Any] = [SystemMessage(content=system_prompt)]
 
-    # Incluir historial previo si está disponible
-    if chat_history:
-        for msg in chat_history[-6:]:  # Conservar últimos 3 intercambios para contexto ágil
-            if msg.get("role") == "user":
-                messages.append(HumanMessage(content=msg.get("content", "")))
-            elif msg.get("role") == "assistant":
-                messages.append(AIMessage(content=msg.get("content", "")))
+    # Últimos 3 intercambios para dar contexto sin gastar demasiados tokens
+    for msg in history[-6:]:
+        if msg.get("role") == "user":
+            messages.append(HumanMessage(content=msg.get("content", "")))
+        elif msg.get("role") == "assistant":
+            messages.append(AIMessage(content=msg.get("content", "")))
 
-    # Mensaje actual con contexto RAG (usando la pregunta original)
     if context_text:
-        user_prompt_with_context = (
+        user_prompt = (
             f"Pregunta del estudiante:\n{query}\n\n"
             f"Contexto relevante obtenido de los documentos de estudio:\n{context_text}\n\n"
             "Por favor responde como Mentor.ia basándote en el contexto anterior."
         )
     else:
-        user_prompt_with_context = (
+        user_prompt = (
             f"Pregunta del estudiante:\n{query}\n\n"
             "[Nota: Actualmente no hay documentos de referencia indexados en la carpeta docs/]. "
             "Responde como Mentor.ia brindando una explicación educativa clara con tu conocimiento general."
         )
-    messages.append(HumanMessage(content=user_prompt_with_context))
+    messages.append(HumanMessage(content=user_prompt))
 
-    response = llm.invoke(messages)
-    clean_answer = extract_text_content(response.content)
+    return messages, sources, search_query
 
-    return {
-        "answer": clean_answer,
-        "sources": sources,
-        "search_query": search_query,
-    }
 
+def stream_mentor_answer(messages: List[Any]) -> Iterator[str]:
+    """
+    Paso 2: genera la respuesta en pedazos para mostrarla mientras se escribe.
+
+    Si un modelo falla ANTES de escribir texto, se prueba el siguiente (respaldo).
+    Se hace a mano porque Gemini envía primero pedazos vacíos (su "pensamiento")
+    y el respaldo automático de LangChain ya no se activaría después de ellos.
+    """
+    last_error: Optional[Exception] = None
+    for model in get_chat_models():
+        wrote_text = False
+        try:
+            for chunk in model.stream(messages):
+                text = extract_text_content(chunk.content)
+                if text:
+                    wrote_text = True
+                    yield text
+            return  # Respuesta completa
+        except Exception as e:
+            if wrote_text:
+                raise  # Ya se mostró parte de la respuesta: no mezclar dos modelos
+            print(f"El modelo {getattr(model, 'model', '?')} falló ({e}). Probando con el de respaldo...")
+            last_error = e
+    if last_error:
+        raise last_error
+
+
+def query_mentor(
+    query: str,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
+    vectorstore: Optional[FAISS] = None,
+    project_instructions: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Versión sin streaming (respuesta completa de una vez). Útil para pruebas."""
+    messages, sources, search_query = prepare_mentor_messages(
+        query, chat_history, vectorstore, project_instructions
+    )
+    answer = "".join(stream_mentor_answer(messages))
+    return {"answer": answer, "sources": sources, "search_query": search_query}
