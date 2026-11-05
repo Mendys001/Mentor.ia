@@ -67,10 +67,15 @@ def init_db() -> None:
                 sources         TEXT,
                 search_query    TEXT,
                 original_query  TEXT,
+                attachment      TEXT,
                 created_at      TEXT NOT NULL
             );
             """
         )
+        # Migración: bases creadas antes de existir la columna "attachment"
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "attachment" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN attachment TEXT")
 
 
 # ==============================================================================
@@ -214,12 +219,14 @@ def add_message(
     sources: Optional[List[Dict[str, Any]]] = None,
     search_query: Optional[str] = None,
     original_query: Optional[str] = None,
+    attachment: Optional[str] = None,
 ) -> None:
+    """attachment: formato del documento pedido ("pdf", "docx" o "md"), si lo hubo."""
     now = _now()
     with _db() as conn:
         conn.execute(
             "INSERT INTO messages (conversation_id, role, content, sources, search_query, "
-            "original_query, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "original_query, attachment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 conv_id,
                 role,
@@ -227,6 +234,7 @@ def add_message(
                 json.dumps(sources, ensure_ascii=False) if sources else None,
                 search_query,
                 original_query,
+                attachment,
                 now,
             ),
         )
@@ -242,12 +250,28 @@ def get_messages(conv_id: str) -> List[Dict[str, Any]]:
 
     messages = []
     for r in rows:
-        msg = {"role": r["role"], "content": r["content"]}
+        msg = {"id": r["id"], "role": r["role"], "content": r["content"]}
         if r["sources"]:
             msg["sources"] = json.loads(r["sources"])
         if r["search_query"]:
             msg["search_query"] = r["search_query"]
         if r["original_query"]:
             msg["original_query"] = r["original_query"]
+        if r["attachment"]:
+            msg["attachment"] = r["attachment"]
         messages.append(msg)
     return messages
+
+
+def delete_messages_from(conv_id: str, message_id: int) -> None:
+    """
+    Borra un mensaje y TODOS los que vienen después en la conversación.
+    Se usa para reintentar o editar una pregunta: se recorta la conversación
+    desde esa pregunta y se vuelve a enviar.
+    """
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+            (conv_id, message_id),
+        )
+        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (_now(), conv_id))
